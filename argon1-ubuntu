@@ -68,71 +68,86 @@ EOM
 # -*- mode: Python; tab-width: 4; indent-tabs-mode: nil; -*-
 # PEP 8, PEP 263.
 """
-Argon Systemd Shutdown script
-"""
-
-import sys
-import smbus
-import RPi.GPIO as GPIO
-
-rev = GPIO.RPI_INFO['P1_REVISION']
-if rev == 2 or rev == 3:
-    bus = smbus.SMBus(1)
-else:
-    bus = smbus.SMBus(0)
-
-if len(sys.argv) > 1:
-    # TODO: Check this commit, is it required? Perhaps context invocation based on Pi model?
-    # https://github.com/kounch/argonone/commit/973634f5b3795148b03ede2aeaae38b02c05c070
-    bus.write_byte(0x1A, 0)
-    if sys.argv[1] == "poweroff" or sys.argv[1] == "halt":
-        try:
-            bus.write_byte_data(0x1A, 0, 0xFF)
-        except:
-            rev = 0
-EOM
-    chmod 755 "${shutdownscript}"
-
-    # Generate script to monitor shutdown button
-    cat <<'EOM' >"${powerbuttonscript}"
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# -*- mode: Python; tab-width: 4; indent-tabs-mode: nil; -*-
-# PEP 8, PEP 263.
-"""
 Argon One Fan and Button Service Daemon
 """
 
 import smbus
-import RPi.GPIO as GPIO
+# import RPi.GPIO as GPIO
+from gpiozero import Button
+from signal import pause
+import os
 import time
 from threading import Thread
-from subprocess import run
+import logging
 
-rev = GPIO.RPI_INFO['P1_REVISION']
-if rev == 2 or rev == 3:
-    bus = smbus.SMBus(1)
-else:
-    bus = smbus.SMBus(0)
+logging.basicConfig(
+    format="%(asctime)s %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=logging.INFO)
+log = logging.getLogger("argonone")
+log.setLevel(logging.INFO)
 
-GPIO.setwarnings(False)
-GPIO.setmode(GPIO.BCM)
-shutdown_pin = 4
-GPIO.setup(shutdown_pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+check_interval = 10
+#rev = GPIO.RPI_REVISION
+#if rev == 2 or rev == 3:
+#    bus = smbus.SMBus(1)
+#else:
+#    bus = smbus.SMBus(0)
+bus = smbus.SMBus(1)
 
+#GPIO.setwarnings(False)
+#GPIO.setmode(GPIO.BCM)
+button_pin = 4
+#GPIO.setup(shutdown_pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+button = Button(button_pin, pull_up=False)
 
-def shutdown_check():
-    while True:
-        pulsetime = 1
-        GPIO.wait_for_edge(shutdown_pin, GPIO.RISING)
-        time.sleep(0.01)
-        while GPIO.input(shutdown_pin) == GPIO.HIGH:
-            time.sleep(0.01)
-            pulsetime += 1
-        if pulsetime >= 2 and pulsetime <= 3:
-            run("reboot")
-        elif pulsetime >= 4 and pulsetime <= 5:
-            run("shutdown now -h")
+max_fan_mode = False
+
+# shutdown_button_press_time = 0
+
+def button_pressed():
+#     global shutdown_button_press_time
+#     shutdown_button_press_time = time.time()
+    global max_fan_mode
+    max_fan_mode = not max_fan_mode
+    log.info(f"Button is pressed, max fan mode is {max_fan_mode}.")
+
+# def button_released():
+#     global shutdown_button_press_time
+#     if shutdown_button_press_time == 0:
+#         log.error("The button is not pressed but released, weird...")
+#         return
+#
+#     held_duration = time.time() - shutdown_button_press_time
+#     log.info(f"The button was pressed and held for {held_duration:.2f} seconds.")
+#
+#     if held_duration >= 2 and held_duration <= 3:
+#         log.info("Reboot...")
+#         os.system("reboot")
+#     elif held_duration >= 4 and held_duration <= 5:
+#         loging.info("Shutdown...")
+#         os.system("shutdown now -h")
+#
+#     shutdown_button_press_time = 0
+
+def button_check():
+    button.when_pressed = button_pressed
+    # shutdown_button.when_released = shutdown_button_released
+
+    pause()
+    # while True:
+    #     pulsetime = 1
+    #     GPIO.wait_for_edge(shutdown_pin, GPIO.RISING)
+    #     time.sleep(0.01)
+    #     while GPIO.input(shutdown_pin) == GPIO.HIGH:
+    #         time.sleep(0.01)
+    #         pulsetime += 1
+    #     if pulsetime >= 2 and pulsetime <= 3:
+    #         # TODO: Use subprocess instead of os.system
+    #         os.system("reboot")
+    #     elif pulsetime >= 4 and pulsetime <= 5:
+    #         # TODO: Use subprocess instead of os.system
+    #         os.system("shutdown now -h")
 
 
 def get_fanspeed(tempval, configlist):
@@ -188,32 +203,38 @@ def temp_check():
     tmpconfig = load_config("/etc/argononed.conf")
     if len(tmpconfig) > 0:
         fanconfig = tmpconfig
-    address = 0x1A
+    address = 0x1a
     prevblock = 0
     while True:
         with open("/sys/class/thermal/thermal_zone0/temp", "r") as fp:
             temp = fp.read()
         val = float(int(temp)/1000)
+        log.info(f"CPU temperature: {val}")
         block = get_fanspeed(val, fanconfig)
+        if max_fan_mode:
+            block = 100
         if block < prevblock:
-            time.sleep(30)
+            time.sleep(check_interval)
         prevblock = block
         try:
             bus.write_byte(address, block)
-        except IOError:
+            log.info(f"Set fan speed to {block}.")
+        except IOError as e:
             temp = ""
-        time.sleep(30)
+            log.error("Cannot set fan speed.", exc_info=True)
+        time.sleep(check_interval)
 
 
 try:
-    t1 = Thread(target=shutdown_check)
+    t1 = Thread(target=button_check)
     t2 = Thread(target=temp_check)
     t1.start()
     t2.start()
 except:
     t1.stop()
     t2.stop()
-    GPIO.cleanup()
+    # GPIO.cleanup()
+
 EOM
     chmod 755 "${powerbuttonscript}"
 
